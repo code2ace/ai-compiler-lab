@@ -430,16 +430,34 @@ public:
 
         /***** unrolling */
         Value *ColAVec_k1 = PoisonValue::get(V4F);
+
+        // Unroll BVec creation
+        // Same column, next row, indexed by indvars.iv + 1
+        auto C0 = ConstantInt::get(IVK1->getType(), 0);
+        auto C4 = ConstantInt::get(IVK1->getType(), 4);
+        auto C8 = ConstantInt::get(IVK1->getType(), 8);
+        auto C12 = ConstantInt::get(IVK1->getType(), 12);
+
+
+        // For building rows of A
+        // Precompute row base for A
+        Value *Arow0 = Builder.CreateInBoundsGEP(F32, LP.ABase, C0, "Arow0");
+        Value *Arow1 = Builder.CreateInBoundsGEP(F32, LP.ABase, C4, "Arow1");
+        Value *Arow2 = Builder.CreateInBoundsGEP(F32, LP.ABase, C8, "Arow2");
+        Value *Arow3 = Builder.CreateInBoundsGEP(F32, LP.ABase, C12, "Arow3");
+        
+        Value *ARowBases[4] = {Arow0, Arow1, Arow2, Arow3};
+
         // TODO: hard coded 4 since we are doing 4x4 tiling
         for (int r = 0; r < 4; r++) {
             // Unroll indvars.iv by 2, so create A row vec for next column of A (in the same loop body of the IR)
             auto CI_row4 = ConstantInt::get(IVK1->getType(), r * 4);
             // Calculate index into A
-            Value *Idx = Builder.CreateAdd(CI_row4, IVK1, 
-                                    "a_idx_"+Twine(r)+ "_k1", true, true);
+            //Value *Idx = Builder.CreateAdd(CI_row4, IVK1, 
+            //                        "a_idx_"+Twine(r)+ "_k1", true, true);
             // Get pointer value at A[Idx]
-            Value *A_ptr_k1 = Builder.CreateGEP(F32, LP.ABase, 
-                            Idx, "a_idx_"+Twine(r)+ "_k1_ptr");
+            Value *A_ptr_k1 = Builder.CreateGEP(F32, ARowBases[r], 
+                            IVK1, "a_idx_"+Twine(r)+ "_k1_ptr");
             
             // Create Load inst from the pointer value of A[Idx]
             LoadInst *A_ptr_k1_ld = Builder.CreateLoad(F32, A_ptr_k1, "a_"+Twine(r)+"_k1");
@@ -447,6 +465,11 @@ public:
             ColAVec_k1 = Builder.CreateInsertElement(ColAVec_k1, A_ptr_k1_ld, r);
         }
         /***** unrolling ---*/
+        
+        // Construct GEP and load for B[IVK1*4+j]
+        // Same column as indexed by indvars.iv, but the next row
+        Value *IdxK1_4 = Builder.CreateMul(IVK1, C4, 
+            "b_idx_k1x4",true, true);
         // Create vectors for storing the result phi nodes
         // So we can combine them later
         SmallVector<PHINode*, 4> CVecPhisK;
@@ -474,16 +497,7 @@ public:
             // all share the same B column
             RCInfo &RC = ColK[0];
             Value *ColSplat = Builder.CreateVectorSplat(4, RC.B);
-
-            // Unroll BVec creation
-            // Same column, next row, indexed by indvars.iv + 1
-            auto C4 = ConstantInt::get(IVK1->getType(), 4);
             auto Cj = ConstantInt::get(IVK1->getType(), RC.Col);
-
-            // Construct GEP and load for B[IVK1*4+j]
-            // Same column as indexed by indvars.iv, but the next row
-            Value *IdxK1_4 = Builder.CreateMul(IVK1, C4, 
-                "b_idx_k1x4_"+Twine(k),true, true);
 
             /***** unrolling */
             // IVK1*4 + j
