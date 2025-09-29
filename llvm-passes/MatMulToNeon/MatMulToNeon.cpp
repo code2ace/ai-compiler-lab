@@ -468,10 +468,10 @@ public:
 
         // For building rows of A
         // Precompute row base for A
-        Value *Arow0 = Builder.CreateInBoundsGEP(F32, LP.ABase, C0, "Arow0");
-        Value *Arow1 = Builder.CreateInBoundsGEP(F32, LP.ABase, C4, "Arow1");
-        Value *Arow2 = Builder.CreateInBoundsGEP(F32, LP.ABase, C8, "Arow2");
-        Value *Arow3 = Builder.CreateInBoundsGEP(F32, LP.ABase, C12, "Arow3");
+        Value *Arow0 = HB.CreateInBoundsGEP(F32, LP.ABase, C0, "Arow0");
+        Value *Arow1 = HB.CreateInBoundsGEP(F32, LP.ABase, C4, "Arow1");
+        Value *Arow2 = HB.CreateInBoundsGEP(F32, LP.ABase, C8, "Arow2");
+        Value *Arow3 = HB.CreateInBoundsGEP(F32, LP.ABase, C12, "Arow3");
         
         Value *ARowBases[4] = {Arow0, Arow1, Arow2, Arow3};
 
@@ -479,8 +479,8 @@ public:
         // Store load instruction for each row of A
         Value *ARowLds[4];
         for (int i = 0; i < 4; i++) {
-            Value *ARow_ptr = Builder.CreateBitCast(ARowBases[i], PtrV4Ty);
-            ARowLds[i] = Builder.CreateAlignedLoad(V4F, ARow_ptr, 
+            Value *ARow_ptr = HB.CreateBitCast(ARowBases[i], PtrV4Ty);
+            ARowLds[i] = HB.CreateAlignedLoad(V4F, ARow_ptr, 
                 Align(4), "arow"+Twine(i));
         }
 
@@ -509,8 +509,8 @@ public:
             // Create Load inst from the pointer value of A[Idx]
           /*   LoadInst *A_ptr_k1_ld = Builder.CreateLoad(F32, ARowLds[r], "a_"+Twine(r)+"_k1");
             A_ptr_k1_ld->setAlignment(Align(4));  */
-            Value *ARowElmK = Builder.CreateExtractElement(ARowLds[r], 
-                IVPhi, "ARow_"+Twine(r)+"_k");
+         /*    Value *ARowElmK = Builder.CreateExtractElement(ARowLds[r], 
+                IVPhi, "ARow_"+Twine(r)+"_k"); */
             ColAVec_k = insertA(ColAVec_k, extractA(ARowLds[r], IVPhi), r);
             //ColAVec_k = Builder.CreateInsertElement(ColAVec_k, ARowElmK, r);
             ColAVec_k1 = insertA(ColAVec_k1, extractA(ARowLds[r], IVK1), r);
