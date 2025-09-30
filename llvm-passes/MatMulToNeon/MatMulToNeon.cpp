@@ -316,6 +316,8 @@ public:
         BasicBlock *Header = L.getHeader();
         BasicBlock *Body = Header; // deal with single-block loops for now
         BasicBlock *Latch = L.getLoopLatch();
+        BasicBlock *Exit = L.getExitBlock();
+        BasicBlock *Preheader = L.getLoopPreheader();
         if (!Header) return false;
 
         // Collect candidate accumulator PHIs
@@ -381,6 +383,7 @@ public:
         // IR builders, one for Latch, one for Header
         IRBuilder<> Builder(Latch->getTerminator());
         IRBuilder<> HB(&(*Header->getFirstNonPHIIt()));
+        IRBuilder<> PB(&(*Preheader->getFirstInsertionPt()));
 
         LLVMContext &Ctx = F.getContext();
         Type *F32 = Type::getFloatTy(Ctx);
@@ -468,10 +471,10 @@ public:
 
         // For building rows of A
         // Precompute row base for A
-        Value *Arow0 = HB.CreateInBoundsGEP(F32, LP.ABase, C0, "Arow0");
-        Value *Arow1 = HB.CreateInBoundsGEP(F32, LP.ABase, C4, "Arow1");
-        Value *Arow2 = HB.CreateInBoundsGEP(F32, LP.ABase, C8, "Arow2");
-        Value *Arow3 = HB.CreateInBoundsGEP(F32, LP.ABase, C12, "Arow3");
+        Value *Arow0 = PB.CreateInBoundsGEP(F32, LP.ABase, C0, "Arow0");
+        Value *Arow1 = PB.CreateInBoundsGEP(F32, LP.ABase, C4, "Arow1");
+        Value *Arow2 = PB.CreateInBoundsGEP(F32, LP.ABase, C8, "Arow2");
+        Value *Arow3 = PB.CreateInBoundsGEP(F32, LP.ABase, C12, "Arow3");
         
         Value *ARowBases[4] = {Arow0, Arow1, Arow2, Arow3};
 
@@ -479,8 +482,8 @@ public:
         // Store load instruction for each row of A
         Value *ARowLds[4];
         for (int i = 0; i < 4; i++) {
-            Value *ARow_ptr = HB.CreateBitCast(ARowBases[i], PtrV4Ty);
-            ARowLds[i] = HB.CreateAlignedLoad(V4F, ARow_ptr, 
+            Value *ARow_ptr = PB.CreateBitCast(ARowBases[i], PtrV4Ty);
+            ARowLds[i] = PB.CreateAlignedLoad(V4F, ARow_ptr, 
                 Align(4), "arow"+Twine(i));
         }
 
@@ -606,6 +609,9 @@ public:
             CRes[i] = HB.CreateFAdd(CVecPhisK[i], CVecPhisK_1[i]);
         }
 
+        // TODO: Move extraelement of final results out of the header
+        // and into the loop exit block
+        IRBuilder<> EB(&(*Exit->getFirstNonPHIIt())); 
         // Replace scalars with vector phi
         // Traverse through all phi nodes storing the result before 
         // vectorization
@@ -619,9 +625,6 @@ public:
 
                 //Value *ResVal = HB.CreateExtractElement(VecPNs[k], i);
                 Value *ResVal = HB.CreateExtractElement(CRes[k], i);
-     /*            errs() << "K " << k << "\n";
-                errs() << "ResVal: ";
-                ResVal->dump(); */
                 // Replace all uses inside the loop
                 PN->replaceAllUsesWith(ResVal);
                 bool Changed = formLCSSA(L, DT, &LI, &SE);
