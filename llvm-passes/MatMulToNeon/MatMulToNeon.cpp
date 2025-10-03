@@ -1,3 +1,4 @@
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -29,6 +30,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/IntrinsicsAArch64.h"
+#include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
@@ -407,7 +409,7 @@ public:
         SmallVector<RCInfo, 4> ColA = ColVecs[0];
 
 
-        Value *ColAVec = PoisonValue::get(V4F);
+/*         Value *ColAVec = PoisonValue::get(V4F);
         // ColK contains load instructions from column 0 of A, sorted by
         // row number
         for (int i = 0; i < ColA.size(); i++) {
@@ -415,7 +417,7 @@ public:
             // TODO: maybe change the index to Builder.getInt32(i)
             ColAVec = Builder.CreateInsertElement(ColAVec, RC.A, i);
         }
-
+ */
         /***** unrolling */
        
 
@@ -428,45 +430,53 @@ public:
         auto C12 = ConstantInt::get(IVK1->getType(), 12);
 
 
+        // Build BBases
+        Value *BRowBases[4];
+        
+        BRowBases[0] = Builder.CreateInBoundsGEP(F32, LP.BBase, C0, "BRow0");
+        BRowBases[1] = Builder.CreateInBoundsGEP(F32, LP.BBase, C4, "BRow1");
+        BRowBases[2] = Builder.CreateInBoundsGEP(F32, LP.BBase, C8, "BRow2");
+        BRowBases[3] = Builder.CreateInBoundsGEP(F32, LP.BBase, C12, "BRow3");
         // For building splats of B
-        Value *B_k_idx = Builder.CreateShl(IVPhi, C2, "b_k_idx", true, true);
+/*         Value *B_k_idx = Builder.CreateShl(IVPhi, C2, "b_k_idx", true, true);
         Value *B_k1_idx = Builder.CreateAdd(B_k_idx, C4, "b_k1_idx", true, true);
         // Construct BBase for k and k+1
         Value *BBase_k = Builder.CreateInBoundsGEP(F32, LP.BBase, 
             B_k_idx, "BBase_k");
         Value *BBase_k1 = Builder.CreateInBoundsGEP(F32, LP.BBase, 
             B_k1_idx, "BBase_k1");
-
+ */
 
         // Construct GEP and load for B[IVK1*4+j]
         // Same column as indexed by indvars.iv, but the next row
-        Value *IdxK1_4 = Builder.CreateMul(IVK1, C4, 
-            "b_idx_k1x4",true, true);
+/*         Value *IdxK1_4 = Builder.CreateMul(IVK1, C4, 
+            "b_idx_k1x4",true, true); */
         // Create vectors for storing the result phi nodes
         // So we can combine them later
         SmallVector<PHINode*, 4> CVecPhisK;
-        SmallVector<PHINode*, 4> CVecPhisK_1;
-
-        auto lane = [&](Value *Vec, int j) {
-            return Builder.CreateExtractElement(Vec, Builder.getInt32(j));
-        };
-
-        auto splat = [&](Value *s) {
-            return Builder.CreateVectorSplat(4, s);
-        };
+        //SmallVector<PHINode*, 4> CVecPhisK_1;
 
         auto *PtrV4Ty = PointerType::getUnqual(V4F->getContext());
-        Value *Bv_ptr = Builder.CreateBitCast(BBase_k, PtrV4Ty);
+ /*        Value *Bv_ptr = Builder.CreateBitCast(BBase_k, PtrV4Ty);
         Value *Bv1_ptr = Builder.CreateBitCast(BBase_k1, PtrV4Ty);
 
         LoadInst *Bv = Builder.CreateAlignedLoad(V4F, Bv_ptr, Align(4),"brow.k");
         LoadInst *Bv1 = Builder.CreateAlignedLoad(V4F, Bv1_ptr, Align(4),"brow.k1");
+ */
+        // Load instructions for each row of B
+        Value *BRowLds[4];
 
+        for (int i = 0; i < 4; i++) {
+            Value *BRow_ptr = Builder.CreateBitCast(BRowBases[i], PtrV4Ty);
+            BRowLds[i] = Builder.CreateAlignedLoad(V4F, BRow_ptr, 
+                Align(4), "brow"+Twine(i));
+        }
+/* 
         Value *bs_k[4], *bs_k1[4];
         for (int j = 0; j < 4; j++) {
             bs_k[j] = splat(lane(Bv, j));
             bs_k1[j] = splat(lane(Bv1, j));
-        }
+        } */
 
 
         // For building rows of A
@@ -499,14 +509,40 @@ public:
             return Builder.CreateInsertElement(Vec, Elm, Idx);
         };
 
-        for (int r = 0; r < 4; r++) {
+        auto SV = [&](ArrayRef<int> Mask, Value *A, Value *B) {
+            SmallVector<int, 8> M(Mask.begin(), Mask.end());
+            return Builder.CreateShuffleVector(A, B, M);
+        };
+
+        Value *A_r0 = ARowLds[0];
+        Value *A_r1 = ARowLds[1];
+        Value *A_r2 = ARowLds[2];
+        Value *A_r3 = ARowLds[3];
+
+        Value *t0 = SV({0,4,1,5}, A_r0, A_r1);
+        Value *t1 = SV({0,4,1,5}, A_r2, A_r3);
+        Value *t2 = SV({2,6,3,7}, A_r0, A_r1);
+        Value *t3 = SV({2,6,3,7}, A_r2, A_r3);
+
+        Value *col0 = SV({0,1,4,5}, t0, t1); // [a00, a10, a20, a30]
+        Value *col1 = SV({2,3,6,7}, t0, t1); // [a01, a11, a21, a31]
+        Value *col2 = SV({0,1,4,5}, t2, t3); // [a02, a12, a22, a32]
+        Value *col3 = SV({2,3,6,7}, t2, t3); // [a03, a13, a23, a33]
+        
+        Value *ColAVecs[4];
+        ColAVecs[0] = col0;
+        ColAVecs[1] = col1;
+        ColAVecs[2] = col2;
+        ColAVecs[3] = col3;
+
+/*         for (int r = 0; r < 4; r++) {
             // Unroll indvars.iv by 2, so create A row vec for next column of A (in the same loop body of the IR)
             //auto CI_row4 = ConstantInt::get(IVK1->getType(), r * 4);
             // Calculate index into A
             //Value *Idx = Builder.CreateAdd(CI_row4, IVK1, 
             //                        "a_idx_"+Twine(r)+ "_k1", true, true);
             // Get pointer value at A[Idx]
-            /* Value *A_ptr_k1 = Builder.CreateGEP(F32, ARowBases[r], 
+            Value *A_ptr_k1 = Builder.CreateGEP(F32, ARowBases[r], 
                             IVK1, "a_idx_"+Twine(r)+ "_k1_ptr");
              */
             // Create Load inst from the pointer value of A[Idx]
@@ -514,29 +550,32 @@ public:
             A_ptr_k1_ld->setAlignment(Align(4));  */
          /*    Value *ARowElmK = Builder.CreateExtractElement(ARowLds[r], 
                 IVPhi, "ARow_"+Twine(r)+"_k"); */
-            ColAVec_k = insertA(ColAVec_k, extractA(ARowLds[r], IVPhi), r);
+          
+            //ColAVec_k = insertA(ColAVec_k, extractA(ARowLds[r], IVPhi), r);
             //ColAVec_k = Builder.CreateInsertElement(ColAVec_k, ARowElmK, r);
-            ColAVec_k1 = insertA(ColAVec_k1, extractA(ARowLds[r], IVK1), r);
-           // ColAVec_k1 = Builder.CreateInsertElement(ColAVec_k1, ARowLds[r], r);
-        }
- 
+            //ColAVec_k1 = insertA(ColAVec_k1, extractA(ARowLds[r], IVK1), r);
+            //ColAVec_k1 = Builder.CreateInsertElement(ColAVec_k1, ARowLds[r], r);
+        //} 
 
         for(int k = 0; k < 4; k++) {
             auto CVecK = PHINode::Create(V4F, 2,
             "cvec"+Twine(k), Header->getFirstNonPHIIt());
             SmallVector<RCInfo, 4> ColK = ColVecs[k];
             // CVecK_1 for unrolling K by 2
-            auto CVecK_1 = PHINode::Create(V4F, 2,
-            "cvec"+Twine(k)+"_1", Header->getFirstNonPHIIt());
+/*             auto CVecK_1 = PHINode::Create(V4F, 2,
+            "cvec"+Twine(k)+"_1", Header->getFirstNonPHIIt()); */
             CVecPhisK.push_back(CVecK);
-            CVecPhisK_1.push_back(CVecK_1);
+          //  CVecPhisK_1.push_back(CVecK_1);
 
             // Create vector phi
             auto *ZeroV = Constant::getNullValue(V4F);
             auto *Preheader = L.getLoopPreheader();
 
             CVecK->addIncoming(ZeroV, Preheader);
-            CVecK_1->addIncoming(ZeroV, Preheader);
+       //     CVecK_1->addIncoming(ZeroV, Preheader);
+
+/*             CVecK_vec[k] = CVecK;
+            CVecK1_vec[k] = CVecK_1; */
 
             // Used for splatting B
             // Using first phi in the ColK vector, since they
@@ -574,47 +613,130 @@ public:
  */
             // Preserve FMF - not sure if it's necessary 
             // TODO: double check 
-            FastMathFlags FMF;
+/*             FastMathFlags FMF;
             if (auto *FPOp = dyn_cast<FPMathOperator>(ColK[0].Add)) {
                 FMF = FPOp->getFastMathFlags();
                 Builder.setFastMathFlags(FMF);
-            }
+            } */
 
             // Construct the FMA
-            Function *FMA = Intrinsic::getOrInsertDeclaration(Header->getModule(),
+/*             Function *FMA = Intrinsic::getOrInsertDeclaration(Header->getModule(),
                                 Intrinsic::fma, {V4F});
-            Value *ColAcc = Builder.CreateCall(FMA, {ColAVec, bs_k[k], CVecK});
+            Value *ColAcc = Builder.CreateCall(FMA, {ColAVecs[k], bs_k[k], CVecK});
             FMA->setAttributes(F.getAttributes());
             // ColAcc->dump();
 
             CVecK->addIncoming(ColAcc, Latch);
             VecPNs.push_back(CVecK);
-
+ */
             /***** unrolling */
             // TODO: probably should just reuse FMA from above?
-            Function *FMA_k1 = Intrinsic::getOrInsertDeclaration(Header->getModule(), 
+/*             Function *FMA_k1 = Intrinsic::getOrInsertDeclaration(Header->getModule(), 
                                 Intrinsic::fma, {V4F});
             Value *ColAcc_k1 = Builder.CreateCall(FMA_k1, {ColAVec_k1, bs_k1[k], CVecK_1});
             FMA_k1->setAttributes(F.getAttributes());
-            CVecK_1->addIncoming(ColAcc_k1, Latch);
+            CVecK_1->addIncoming(ColAcc_k1, Latch); */
             // TODO: VecPN is probably no longer needed after unrolling
-            VecPNs.push_back(CVecK_1);
+            //VecPNs.push_back(CVecK_1);
             
 
         } // End for loop for one k (B[j][0] -> B[j][k])
 
-        Value *CRes[4];
-        // TODO: hardcoded 4
+        //Value *CVecK_vec[4];
+        //Value *CVecK1_vec[4];
+        
+        auto lane = [&](Value *Vec, int j) {
+            return Builder.CreateExtractElement(Vec, Builder.getInt32(j));
+        };
+
+        auto splat = [&](Value *s) {
+            return Builder.CreateVectorSplat(4, s);
+        };
+
+        
+        FastMathFlags FMF; 
+        FMF.setFast();
+        Builder.setFastMathFlags(FMF);
+
+        Function *FMA = Intrinsic::getOrInsertDeclaration(Header->getModule(),
+                Intrinsic::fma, {V4F});
+
+        Value *Acc[4];
         for (int i = 0; i < 4; i++) {
-            CRes[i] = HB.CreateFAdd(CVecPhisK[i], CVecPhisK_1[i]);
+            Acc[i] = CVecPhisK[i];
+        }
+
+        SmallVector<SmallVector<Value*, 4>, 4> BRowSplats;
+        for (int i = 0; i < 4; i++) {
+            //Value *BRow_i = BRowLds[i];
+            // Row splat for row i of B
+            // 4 vectors splats each index (col) of row i
+            SmallVector<Value*, 4> BRowSplat_i;
+            Value *curr;
+            curr = splat(lane(BRowLds[i], 0));
+            BRowSplat_i.push_back(curr);
+
+            curr = splat(lane(BRowLds[i], 1));
+            BRowSplat_i.push_back(curr);
+
+            curr = splat(lane(BRowLds[i], 2));
+            BRowSplat_i.push_back(curr);
+
+            curr = splat(lane(BRowLds[i], 3));
+            BRowSplat_i.push_back(curr);
+
+            BRowSplats.push_back(BRowSplat_i);
+        }
+
+        for (int i = 0; i < 4; i++) {
+            // V0: fma of column of A and first element of row B splatted
+      /*       Value *BRowSplat0 = splat(lane(BRowLds[i], 0));
+            Value *BRowSplat1 = splat(lane(BRowLds[i], 1));
+            Value *BRowSplat2 = splat(lane(BRowLds[i], 2));
+            Value *BRowSplat3 = splat(lane(BRowLds[i], 3));
+ */            
+            CallInst *V0 = Builder.CreateCall(FMA, {ColAVecs[i], 
+                BRowSplats[i][0], Acc[0]});
+            V0->setFastMathFlags(FMF);
+            Acc[0] = V0;
+
+            CallInst *V1 = Builder.CreateCall(FMA, {ColAVecs[i], 
+                BRowSplats[i][1], Acc[1]});
+            V1->setFastMathFlags(FMF);
+            Acc[1] = V1;
+            
+            CallInst *V2 = Builder.CreateCall(FMA, {ColAVecs[i], 
+                BRowSplats[i][2], Acc[2]});
+            V2->setFastMathFlags(FMF);
+            Acc[2] = V2;
+            
+            CallInst *V3 = Builder.CreateCall(FMA, {ColAVecs[i], 
+                BRowSplats[i][3], Acc[3]});
+            V3->setFastMathFlags(FMF);
+            Acc[3] = V3;
+            
+            //VecPNs.push_back(CVecK_1);
+
+            //CVecK_vec[i]
+        }
+
+        for (int i = 0; i < 4; i++) {
+            CVecPhisK[i]->addIncoming(Acc[i], Latch);
         }
 
         // TODO: Move extraelement of final results out of the header
         // and into the loop exit block
-        IRBuilder<> EB(&(*Exit->getFirstNonPHIIt())); 
         // Replace scalars with vector phi
         // Traverse through all phi nodes storing the result before 
         // vectorization
+        IRBuilder<> EB(&(*Exit->getFirstNonPHIIt())); 
+
+        Value *CRes[4];
+        // TODO: hardcoded 4
+/*         for (int i = 0; i < 4; i++) {
+            CRes[i] = HB.CreateFAdd(CVecPhisK[i], CVecPhisK_1[i]);
+        } */
+
         // ColVecs groups phi nodes by column
         for (int k = 0; k < ColVecs.size(); k++) {
             auto &ColK = ColVecs[k];
@@ -624,7 +746,8 @@ public:
                 auto *PN = RC.PN;
 
                 //Value *ResVal = HB.CreateExtractElement(VecPNs[k], i);
-                Value *ResVal = HB.CreateExtractElement(CRes[k], i);
+                //Value *ResVal = HB.CreateExtractElement(CRes[k], i);
+                Value *ResVal = HB.CreateExtractElement(CVecPhisK[k], i);
                 // Replace all uses inside the loop
                 PN->replaceAllUsesWith(ResVal);
                 bool Changed = formLCSSA(L, DT, &LI, &SE);
@@ -638,7 +761,8 @@ public:
         } // End of for loop
 
         // For unrolling, change IV increment to +2
-        Value *StepTwo = ConstantInt::get(IVPhi->getType(), 2);
+        // TODO: remove ind.var for full unrolling
+        Value *StepTwo = ConstantInt::get(IVPhi->getType(), 4);
         Value *NewPhiUpdate = Builder.CreateAdd(IVPhi, StepTwo, "iv.next2", "true", "true");
         IVPhi->setIncomingValueForBlock(Latch, NewPhiUpdate);
 
