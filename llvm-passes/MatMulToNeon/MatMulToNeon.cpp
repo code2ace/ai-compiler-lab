@@ -414,7 +414,7 @@ public:
         for (int i = 0; i < 4; i++) {
             Value *BRow_ptr = Builder.CreateBitCast(BRowBases[i], PtrV4Ty);
             BRowLds[i] = Builder.CreateAlignedLoad(V4F, BRow_ptr, 
-                Align(4), "brow"+Twine(i));
+                Align(16), "brow"+Twine(i));
         }
 /* 
         Value *bs_k[4], *bs_k1[4];
@@ -439,7 +439,7 @@ public:
         for (int i = 0; i < 4; i++) {
             Value *ARow_ptr = PB.CreateBitCast(ARowBases[i], PtrV4Ty);
             ARowLds[i] = PB.CreateAlignedLoad(V4F, ARow_ptr, 
-                Align(4), "arow"+Twine(i));
+                Align(16), "arow"+Twine(i));
         }
 
         // TODO: hard coded 4 since we are doing 4x4 tiling
