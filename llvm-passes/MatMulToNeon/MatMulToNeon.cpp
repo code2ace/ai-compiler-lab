@@ -4,6 +4,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/IVDescriptors.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
@@ -13,6 +14,7 @@
 #include "llvm/IR/Analysis.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -38,14 +40,19 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Alignment.h"
+#include "llvm/Support/CFGUpdate.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/InstructionCost.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/type_traits.h"
 #include "llvm/Transforms/IPO/HotColdSplitting.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
+#include <cstddef>
 #include <string>
 
 // Deal with 4x4 matrices now
@@ -635,9 +642,284 @@ public:
 
         /******* Unrolling */
         // Combine the results from k and k+1 
-
+        flattenFullyUnrolledLoop(L, DT, LI);
 
        // CleanUpScalarPhi(ColVecs);
+
+        return true;
+    } // End function tryRewrite4x4Kernel
+
+    bool flattenFullyUnrolledLoop(Loop &L, DominatorTree &DT, LoopInfo &LI) {
+        BasicBlock *Header = L.getHeader();
+        BasicBlock *Latch = L.getLoopLatch();
+        BasicBlock *Preheader = L.getLoopPreheader();
+        BasicBlock *Exit = L.getExitBlock();
+
+        if (!Header || !Latch || !Preheader || !Exit) {
+            errs() << "Loop does not meet the standards to be flattened\n";
+        }
+
+        Function *F = Header->getParent();
+        LLVMContext &Ctx = F->getContext();     
+
+        // ValueToValue mapping for cloning
+        ValueToValueMapTy VMap;
+
+        // Remap PhiNodes in Header, as they are no longer taking values from latch
+        for (auto &PN: Header->phis()) {
+            Value *Init = PN.getIncomingValueForBlock(Preheader); // get initial value
+            if (!Init) {
+                errs() << "PhiNodes in header lack initial value\n";
+                return false;
+            }
+            VMap[&PN] = Init;
+        }
+
+        // Temorarily copy latch into Temp block, then insert Temp into just before 
+        // terminator of the preheader
+       /*  BasicBlock *TempClone = BasicBlock::Create(Ctx, 
+            Latch->getName() + ".clone", F, Exit); */
+        BasicBlock *TempClone = CloneBasicBlock(Latch, VMap, 
+            Latch->getName() + ".clone", F);
+
+        for (Instruction &I : *TempClone) {
+            RemapInstruction(&I, VMap, llvm::RF_IgnoreMissingLocals);
+        }
+
+        SmallVector<ReturnInst*, 1> Returns;
+        //CloneBasicBlockInto
+        
+        // Move the body of the cloned latch (except for the terminator)
+        // into the preheader, before its terminator
+        Instruction *PreTerm = Preheader->getTerminator();
+        if (!PreTerm) {
+            errs() << "Preheader has no terminator!!\n";
+            return false;
+        }
+
+        // Collect the instructions to move (cannot safely move while iterating forward)
+        SmallVector<Instruction*, 64> ToMove;
+        for (Instruction &I : *TempClone) {
+            if (I.isTerminator()) continue;
+            ToMove.push_back(&I);
+        }
+
+        for (Instruction *I : ToMove) {
+            I->moveBefore(PreTerm->getIterator());
+        }
+
+        bool replaced = replaceLCSSAWithClonedExtracts(L, Preheader, VMap);
+        // Update Exit PHIs to use cloned values from VMap
+        // E.g.,   %c31.0.lcssa = phi float [ %7, %for.cond ]
+/*         for (Instruction &Inst : *Exit) {
+            if (PHINode *PN = dyn_cast<PHINode>(&Inst)) {
+                for (unsigned i = 0, n = PN->getNumIncomingValues(); i < n; i++) {
+                    // Traverse all incoming blocks
+                    BasicBlock *IncomingBB = PN->getIncomingBlock(i);
+                    if (!L.contains(IncomingBB)) { continue; }
+                }
+            }
+        } */
+        using Update = DominatorTree::UpdateType;
+        DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
+  
+        if (replaced) {
+            Header->removePredecessor(Preheader);
+            // Reset Preheader's br destination to branch to Exit instead of header
+            Instruction *Pterm = Preheader->getTerminator();
+            for (unsigned i = 0, n = Pterm->getNumSuccessors(); i < n; i++) {
+                if (Pterm->getSuccessor(i) == Header) {
+                    Pterm->setSuccessor(i, Exit);
+                }
+            }
+        }
+        SmallVector<DominatorTree::UpdateType, 2> U;
+        U.emplace_back(DominatorTree::Delete, Preheader, Header);
+        U.emplace_back(DominatorTree::Insert, Preheader, Exit);
+        DTU.applyUpdates(U);
+
+        // Remove from LoopInfo / DominatorTree
+
+        //Header->removePredecessor(TempClone, true);
+
+        // Delete the cloned temp
+        if (TempClone->empty() || (TempClone->getTerminator() 
+                        && TempClone->getTerminator()->use_empty())) {
+            TempClone->dropAllReferences();
+          //  TempClone->removeFromParent();
+        } 
+        DTU.deleteBB(TempClone);
+        // Remove old loop blocks (Header, Latch etc)
+        SmallVector<BasicBlock*, 8> ToRemove;
+        for (BasicBlock *BB : L.blocks()) {
+            ToRemove.push_back(BB);
+        }
+
+/* 
+        for (BasicBlock *Succ : successors(Latch)) {
+            if (Succ) {
+                DTU.applyUpdates({ Update{DominatorTree::Delete, Latch, Succ}});
+            }
+        }
+
+        for (BasicBlock *Succ : successors(Header)) {
+            if (Succ) {
+                DTU.applyUpdates({Update{DominatorTree::Delete, Header, Succ}});
+            }
+        }
+       */
+        //Latch->dropAllReferences();
+        Latch->dropAllReferences();
+        Header->dropAllReferences();
+        LI.removeBlock(Latch);
+        DTU.deleteBB(Latch);
+
+        LI.removeBlock(Header);
+        DTU.deleteBB(Header);
+   //     Latch->removeFromParent();
+   //     Header->removeFromParent();
+
+
+/*         for (BasicBlock *BB : ToRemove) {
+            if (DT.getNode(BB)) {
+                DT.eraseNode(BB);
+            }
+        } */
+
+/*         for (BasicBlock *BB : ToRemove) {
+            if (BB == Preheader || BB == Exit) {
+                continue;
+            }
+            while (!BB->empty()) {
+                Instruction &I = BB->back();
+                if (!I.use_empty()) {
+                    I.replaceAllUsesWith(UndefValue::get(I.getAccessType()));
+                }
+                I.eraseFromParent();
+            }
+            BB->eraseFromParent();
+        }
+ */
+        LI.erase(&L);
+
+
+        if (verifyFunction(*F, &errs())) {
+            errs() << "Verification failed after loop flattening\n";
+            return false;
+        }
+        
+
+        return true;
+    }
+
+    // Exit: for.end, where LCSSA PHIs live
+    // ForCond: loop header where the extractelement (value for original LCSSA PHIs)
+    // live (for.cond)
+    bool replaceLCSSAWithClonedExtracts(Loop &L,
+                                        BasicBlock* Preheader,
+                                        ValueToValueMapTy &VMap
+                                       /* ArrayRef<Value*> OrigFinalVecs*/) {
+        BasicBlock *Header = L.getHeader();
+        BasicBlock *Latch = L.getLoopLatch();
+       // BasicBlock *Preheader = L.getLoopPreheader();
+        BasicBlock *Exit = L.getExitBlock();
+        LLVMContext &Ctx = Exit->getContext();
+        IRBuilder<> Builder(Ctx);
+
+        // Map from original final vector -> clone final vector
+        /*
+        %52 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %36, <4 x float> %48)
+        %53 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %37, <4 x float> %49)
+        %54 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %38, <4 x float> %50)
+        %55 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %39, <4 x float> %51)
+        */
+/*         DenseMap<const Value*, Value*> OrigToCloned;
+        for (Value *V : OrigFinalVecs) {
+            Value *C = VMap.lookup(V);
+            if (!C) {
+                errs() << "Warning: no cloned value for: "  << *V << "\n";
+                continue;
+            }
+            OrigToCloned[V] = C;
+        } */
+
+        // Collect the LCSSA PHIs to replace
+        SmallVector<PHINode*, 8> LCSSAs;
+
+        for (PHINode &PN : Exit->phis()) {
+            for (unsigned i = 0, n = PN.getNumIncomingValues(); i < n; i++) {
+                // check if the phi node has an incoming value from the header
+                // e.g. %c31.0.lcssa = phi float [ %7, %for.cond ]
+                BasicBlock *IncomingBB = PN.getIncomingBlock(i);
+                if (IncomingBB == Header) {
+                    LCSSAs.push_back(&PN);
+                    break;
+                }
+            }
+        }
+
+        // %c31.0.lcssa = phi float [ %7, %for.cond ]
+        // Find the incoming value from header : %7
+        // %7 = extractelement <4 x float> %cvec1, i64 3
+        // %cvec1 = phi <4 x float> [ zeroinitializer, %entry ], [ %53, %for.inc ]
+        for (PHINode *PN : LCSSAs) {
+            // PN : c31.0.lcssa
+            // returns nullptr if Header is not one
+            // of PN's incoming blocks
+            // Guaranteed to be non-null since we checked that before
+            // pushing the PN into LCSSAs
+            Value *HeaderVal = PN->getIncomingValueForBlock(Header);
+            if (!HeaderVal) {
+                errs() << "Warning: PhiNode " << *PN << 
+                " should have an incoming value from the header\n";
+                return false;
+            }
+            // Check if the incoming value is an extractelement operation
+            ExtractElementInst *EEInst = dyn_cast<ExtractElementInst>(HeaderVal);
+            if (!EEInst) {
+                // TODO: handle other non-extracelement cases later
+                continue;
+            }
+
+            Value *VecOp = EEInst->getVectorOperand(); // %cvec1
+            Value *IndexOp = EEInst->getIndexOperand(); // i64 3
+
+            PHINode *VecPN = dyn_cast<PHINode>(VecOp);
+            // VecPN: %cvec1 = phi <4 x float> [ zeroinitializer, %entry ], [ %53, %for.inc ]
+            if (VecPN) {
+                Value *LatchVal = VecPN->getIncomingValueForBlock(Latch);
+                // Get the mapped Value for LatchVal in the cloned BB
+                // From VMap
+                if (!LatchVal) {
+                    errs() << "Warning: Accumulator Phi does not have value from latch " 
+                    << *PN << "\n";
+                    return false;
+                }
+                Value *MappedLatchVal = VMap.lookup(LatchVal);
+                if (!MappedLatchVal) {
+                    errs() << "LatchVal is not mapped! LatchVal: " << *LatchVal;
+                    return false; 
+                }
+                Instruction *PreTerm = Preheader->getTerminator();
+                IRBuilder<> PTBuilder(PreTerm);
+                
+                Value *NewExtractInst = nullptr;
+                if (auto *CI = dyn_cast<ConstantInt>(IndexOp)) {
+                    NewExtractInst = PTBuilder.CreateExtractElement(MappedLatchVal, IndexOp);
+                } else {
+                    // Look it up in the VMap if index is not constant
+                    Value *MappedIdx = IndexOp;
+                    if (Value *Mapped = VMap.lookup(IndexOp)) {
+                        MappedIdx = Mapped;
+                    }
+                    NewExtractInst = PTBuilder.CreateExtractElement(MappedLatchVal, MappedIdx);
+                }
+                PN->replaceAllUsesWith(NewExtractInst);
+                PN->eraseFromParent();
+            }
+            
+        } // End of loop for LCSSAs
+
 
         return true;
     }
