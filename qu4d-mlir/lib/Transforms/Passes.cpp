@@ -5,7 +5,7 @@ namespace mlir {
 void registerQu4dPasses() {
   // Call all your qu4d pass registration functions here
   registerLowerMatMul4x4SCFPass();
-  // later: registerOtherQu4dPass();
+  registerQu4dMatmulFromLinalgPass();
 }
 
 } // namespace mlir

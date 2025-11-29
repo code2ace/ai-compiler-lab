@@ -9,5 +9,6 @@ void registerQu4dPasses();
 
 // Specific pass registration (already implemented in LowerMatmul4x4.cpp)
 void registerLowerMatMul4x4SCFPass();
+void registerQu4dMatmulFromLinalgPass();
 
 } // namespace mlir

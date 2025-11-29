@@ -5,6 +5,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
@@ -17,6 +18,7 @@ int main(int argc, char **argv) {
                   scf::SCFDialect,
                   arith::ArithDialect,
                   memref::MemRefDialect,
+                  linalg::LinalgDialect,
                   qu4d::Qu4dDialect>();
 
   // Register all passes defined in your qu4d project

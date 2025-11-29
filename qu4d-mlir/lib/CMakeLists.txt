@@ -4,6 +4,7 @@ add_library(qu4d-mlir-lib
   Transforms/LowerToArith.cpp
   Transforms/DetectMicrokernel.cpp
   Transforms/LowerMatmul4x4.cpp
+  Transforms/Qu4dFromLinalg.cpp
   Transforms/Passes.cpp
 )
 
