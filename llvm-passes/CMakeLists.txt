@@ -17,3 +17,5 @@ link_directories(${LLVM_LIBRARY_DIRS})
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 
 add_subdirectory(MatMulToNeon)
+add_subdirectory(StrengthReduceLoop)
+add_subdirectory(MlirToMatMul)
