@@ -675,37 +675,28 @@ public:
             VMap[&PN] = Init;
         }
 
-        // Temorarily copy latch into Temp block, then insert Temp into just before 
-        // terminator of the preheader
-       /*  BasicBlock *TempClone = BasicBlock::Create(Ctx, 
-            Latch->getName() + ".clone", F, Exit); */
-        BasicBlock *TempClone = CloneBasicBlock(Latch, VMap, 
-            Latch->getName() + ".clone", F);
-
-        for (Instruction &I : *TempClone) {
-            RemapInstruction(&I, VMap, llvm::RF_IgnoreMissingLocals);
-        }
-
-        SmallVector<ReturnInst*, 1> Returns;
-        //CloneBasicBlockInto
-        
-        // Move the body of the cloned latch (except for the terminator)
-        // into the preheader, before its terminator
+        // Clone instructions directly into preheader (no intermediate block needed)
         Instruction *PreTerm = Preheader->getTerminator();
         if (!PreTerm) {
             errs() << "Preheader has no terminator!!\n";
             return false;
         }
 
-        // Collect the instructions to move (cannot safely move while iterating forward)
-        SmallVector<Instruction*, 64> ToMove;
-        for (Instruction &I : *TempClone) {
-            if (I.isTerminator()) continue;
-            ToMove.push_back(&I);
+        SmallVector<Instruction*, 64> ClonedInsts;
+        for (Instruction &OrigI : *Latch) {
+            if (OrigI.isTerminator()) {
+                continue;
+            }
+
+            // Collect cloned instruction
+            Instruction *ClonedI = OrigI.clone();
+            ClonedI->insertBefore(PreTerm->getIterator());
+            VMap[&OrigI] = ClonedI;
+            ClonedInsts.push_back(ClonedI);
         }
 
-        for (Instruction *I : ToMove) {
-            I->moveBefore(PreTerm->getIterator());
+        for (Instruction *I : ClonedInsts) {
+            RemapInstruction(I, VMap, llvm::RF_IgnoreMissingLocals | llvm::RF_NoModuleLevelChanges);
         }
 
         bool replaced = replaceLCSSAWithClonedExtracts(L, Preheader, VMap);
@@ -724,6 +715,7 @@ public:
         DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   
         if (replaced) {
+            errs() << "Replaced LCSSA with cloned extracts\n";
             Header->removePredecessor(Preheader);
             // Reset Preheader's br destination to branch to Exit instead of header
             Instruction *Pterm = Preheader->getTerminator();
@@ -740,15 +732,6 @@ public:
 
         // Remove from LoopInfo / DominatorTree
 
-        //Header->removePredecessor(TempClone, true);
-
-        // Delete the cloned temp
-        if (TempClone->empty() || (TempClone->getTerminator() 
-                        && TempClone->getTerminator()->use_empty())) {
-            TempClone->dropAllReferences();
-          //  TempClone->removeFromParent();
-        } 
-        DTU.deleteBB(TempClone);
         // Remove old loop blocks (Header, Latch etc)
         SmallVector<BasicBlock*, 8> ToRemove;
         for (BasicBlock *BB : L.blocks()) {
@@ -780,26 +763,6 @@ public:
    //     Header->removeFromParent();
 
 
-/*         for (BasicBlock *BB : ToRemove) {
-            if (DT.getNode(BB)) {
-                DT.eraseNode(BB);
-            }
-        } */
-
-/*         for (BasicBlock *BB : ToRemove) {
-            if (BB == Preheader || BB == Exit) {
-                continue;
-            }
-            while (!BB->empty()) {
-                Instruction &I = BB->back();
-                if (!I.use_empty()) {
-                    I.replaceAllUsesWith(UndefValue::get(I.getAccessType()));
-                }
-                I.eraseFromParent();
-            }
-            BB->eraseFromParent();
-        }
- */
         LI.erase(&L);
 
 
@@ -826,22 +789,6 @@ public:
         LLVMContext &Ctx = Exit->getContext();
         IRBuilder<> Builder(Ctx);
 
-        // Map from original final vector -> clone final vector
-        /*
-        %52 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %36, <4 x float> %48)
-        %53 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %37, <4 x float> %49)
-        %54 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %38, <4 x float> %50)
-        %55 = call fast <4 x float> @llvm.fma.v4f32(<4 x float> %23, <4 x float> %39, <4 x float> %51)
-        */
-/*         DenseMap<const Value*, Value*> OrigToCloned;
-        for (Value *V : OrigFinalVecs) {
-            Value *C = VMap.lookup(V);
-            if (!C) {
-                errs() << "Warning: no cloned value for: "  << *V << "\n";
-                continue;
-            }
-            OrigToCloned[V] = C;
-        } */
 
         // Collect the LCSSA PHIs to replace
         SmallVector<PHINode*, 8> LCSSAs;
