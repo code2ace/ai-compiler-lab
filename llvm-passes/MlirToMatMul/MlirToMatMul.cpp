@@ -13,7 +13,10 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -47,9 +50,9 @@ struct MatMulNest {
 };
 
 struct MatMulBase {
-    Value *A;
-    Value *B;
-    Value *C;
+    Value *A = nullptr;
+    Value *B = nullptr;
+    Value *C = nullptr;
 };
 
 enum class IndexKind {
@@ -73,11 +76,6 @@ public:
         auto &LI = AM.getResult<LoopAnalysis>(F);
         auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
         auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
-/*         SmallVector<Loop*, 8> LoopList;
-        LoopList = LI.getLoopsInPreorder();
-        for (Loop *L : LoopList) {
-            analyzeCanonicalLoop(L, SE);
-        } */
 
         auto NestOpt = findMatmulLoopNest(LI, SE);
         if (!NestOpt) {
@@ -85,14 +83,14 @@ public:
             return PreservedAnalyses::all();
         }
         const MatMulNest &Nest = *NestOpt;
-        errs() << "Outer IV: "; Nest.Outer.IndVar->dump();
-        errs() << "Middle IV: "; Nest.Middle.IndVar->dump();
-        errs() << "Inner IV: "; Nest.Inner.IndVar->dump();
+
         PHINode *I = Nest.Outer.IndVar;
         PHINode *J = Nest.Middle.IndVar;
         PHINode *K = Nest.Inner.IndVar;
 
-        auto &InnerLoop = Nest.Inner.L;
+        Loop *InnerLoop = Nest.Inner.L;
+        Loop *MiddleLoop = Nest.Middle.L;
+        Loop *OuterLoop = Nest.Outer.L;
        // BasicBlock *Body = InnerLoop->getHeader()->getSingleSuccessor();
         BasicBlock *Body = InnerLoop->getLoopLatch();
 
@@ -101,6 +99,8 @@ public:
         }
 
         SmallVector<Instruction*, 4> Candidates;
+        AccumulatorPattern AP;
+        MatMulBase MBase;
         for (Instruction &Inst : *Body) {
             auto *BO = dyn_cast<BinaryOperator>(&Inst);
             if (!BO) { continue; }
@@ -133,6 +133,11 @@ public:
                     errs() << "FMul looks like B[k,j]*A[i,k] (swapped):\n";
                     BO->dump();
                 }
+                // Get ABase and BBase from GEPA and GEPB
+                MBase.A = GEPA->getPointerOperand();
+                MBase.B = GEPB->getPointerOperand();
+                errs() << "ABase: "; MBase.A->dump();
+                errs() << "BBase: "; MBase.B->dump();
 
                 SmallVector<AccumulatorPattern, 4> APVec;
                 findAccumulatorPatterns(Nest.Inner.L, APVec);
@@ -143,23 +148,58 @@ public:
                 if (!APOpt) { 
                     continue;
                 }
-                AccumulatorPattern AP = *APOpt;
+                AP = *APOpt;
                 errs() << "AP AccPhi:\n";
                 AP.AccPhi->dump();
                 errs() << "AP FMul:\n";
                 AP.FMul->dump();
                 errs() << "AP FAdd:\n";
                 AP.FAdd->dump();
+
+                std::optional<std::pair<Value*, StoreInst*>> COpt 
+                    = matchCStore(InnerLoop, AP.AccPhi, I, J, K);
+                if (!COpt) { continue; }
+                Value *CBase = COpt->first;
+                errs() << "CBase: "; CBase->dump();
+                MBase.C = CBase;
             }
             
         }
+        Module *M = F.getParent();
+        std::optional<Function*>KernelOpt = createKernelCall(M, OuterLoop, MBase);
+        if (!KernelOpt) {
+            return PreservedAnalyses::all();
+        }
+        Function *Kernel = *KernelOpt;
 
+        Value *ABase = MBase.A;
+        Value *BBase = MBase.B;
+        Value *CBase = MBase.C;
+        BasicBlock *OuterPH = OuterLoop->getLoopPreheader();
+        // Hoist ABase, BBase and CBase into the preheader
+        if (!hoistValueToPreheader(ABase, OuterLoop, OuterPH)) {
+            errs() << "Unable to hoist ABase value: "; ABase->dump();
+            //return std::nullopt;
+        }
+        if (!hoistValueToPreheader(BBase, OuterLoop, OuterPH)) {
+            errs() << "Unable to hoist BBase value: "; BBase->dump();
+            //return std::nullopt;
+        }
+        if (!hoistValueToPreheader(CBase, OuterLoop, OuterPH)) {
+            errs() << "Unable to hoist CBase value: "; CBase->dump();
+            //return std::nullopt;
+        }
+
+        assert(OuterPH && "Outer loop must be canonical and have a preheader\n");
+        IRBuilder<> B(OuterPH->getTerminator());
+        SmallVector<Value*, 3> Args = {ABase, BBase, CBase };
+        B.CreateCall(Kernel, Args);
+        
         return PreservedAnalyses::all();
     }
 
     std::optional<CanonicalLoop> analyzeCanonicalLoop(Loop *L, ScalarEvolution &SE) {
         assert(L && "Null Loop passed in");
-        errs() << "Analyzing loop..."; L->dump();
         BasicBlock *preheader = L->getLoopPreheader();
         BasicBlock *header = L->getHeader();
         BasicBlock *latch = L->getLoopLatch();
@@ -171,8 +211,6 @@ public:
         std::optional<PHINode*>indVarOpt = findIndunctionPhiInLoop(L);
         if (!indVarOpt) { return std::nullopt; }
         PHINode *indVar = *indVarOpt; // or indVarOpt.value(), not sure which is better
-        //errs() << "Find indVar: ";
-        //indVar->dump();
         const SCEV *S = SE.getSCEV(indVar);
 
         const auto *AR = dyn_cast<SCEVAddRecExpr>(S);
@@ -272,26 +310,130 @@ public:
 
             if (!outerInfo || !middleInfo || !innerInfo) { continue; }
             
-            // Check for trip count, requiring each to be 4
-/*             if (!outerInfo->TripCount->equalsInt(4) 
-                || !middleInfo->TripCount->equalsInt(4)
-                || !outerInfo->TripCount->equalsInt(4)) {
-                    continue;
-            } */
             return MatMulNest{*outerInfo, *middleInfo, *innerInfo};
         }
         return std::nullopt;
     }
 
+    std::optional<Function*> createKernelCall(Module *M, Loop *OuterLoop, MatMulBase &MBase);
+
+    // Returns true if a move is successful
+    // Returns false if V cannot be safely hoisted or is non-instruction
+    bool hoistValueToPreheader(Value *V, Loop *OuterLoop, BasicBlock *OuterPreheader,
+                               DominatorTree *DT = nullptr,
+                               SmallPtrSetImpl<Instruction*> *Visited = nullptr);
+
     void findAccumulatorPatterns(Loop *InnerLoop, SmallVector<AccumulatorPattern, 4>& Candidates);
     
     std::optional<AccumulatorPattern> matchAccumulatorPattern(SmallVector<AccumulatorPattern, 4> &Candidates, Value* FMul);
+    std::optional<std::pair<Value*, StoreInst*>> matchCStore(Loop *InnerLoop, PHINode *AccPhi,
+                                                             PHINode *I, PHINode *J, PHINode *K);
 
     IndexKind classifyIndex(Value *Idx,
                             PHINode *I,
                             PHINode *J,
                             PHINode *K);
 };
+
+std::optional<Function*> MlirToMatMulPass::createKernelCall(Module *M, Loop *OuterLoop, MatMulBase &MBase) {
+    BasicBlock *Preheader = OuterLoop->getLoopPreheader();
+    if (!Preheader) {
+        errs() << "Outer loop has no preheader!";
+        return std::nullopt;
+    }
+
+    Value *ABase = MBase.A;
+    Value *BBase = MBase.B;
+    Value *CBase = MBase.C;
+    assert(ABase && BBase && CBase && "Nullptr in base pointers of A, B and C\n");
+
+    Function *Kernel = M->getFunction("mat4x4_16acc_kernel");
+    // declare: void(@AType*, @BType*, @CType*)
+    if (!Kernel) {
+        // Apparently A, B and C should all be float ptr types
+        // Still dynamically setting the types here
+        // Relying on callers of this function for type checking
+        FunctionType *FT = FunctionType::get(Type::getVoidTy(M->getContext()),
+                                            { ABase->getType(), BBase->getType(), 
+                                              CBase->getType()}, false);
+        Kernel = Function::Create(FT, Function::ExternalLinkage, "mat4x4_16acc_kernel", M);
+    }
+    return Kernel;
+}
+
+bool MlirToMatMulPass::hoistValueToPreheader(Value *V, Loop *OuterLoop, BasicBlock *OuterPreheader,
+                                             DominatorTree *DT,
+                                             SmallPtrSetImpl<Instruction*> *Visited) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (!I) return true; // constants/args/globals already outside
+
+    if (!OuterLoop->contains(I)) return true;
+
+    // Cannot hoist out of the loop if it isn't loop-invariant
+    //if (!OuterLoop->isLoopInvariant(I)) return false;
+
+    SmallPtrSet<Instruction*, 8> LocalVisited;
+    if (!Visited) {
+        Visited = &LocalVisited;
+    }
+
+    // Break out of cycles
+    if (!Visited->insert(I).second) {
+        return false;
+    }
+
+    // TODO: maybe relax from mayHaveSideEffects a bit
+    // to allow pure bitcasts, ptrtoint, etc.
+    // For now, just let mayHaveSideEffects decide
+    if (I->mayHaveSideEffects() || isa<CallInst>(I) || isa<StoreInst>(I)) {
+        return false;
+    }
+
+    if (auto *LI = dyn_cast<LoadInst>(I)) {
+        if (LI->isAtomic() || LI->isVolatile()) {
+            return false;
+        }
+    }
+    // Hoist instructions like this:
+    //  %70 = extractvalue { ptr, ptr, i64, [2 x i64], [2 x i64] } %28, 1
+    // Hoist operand first, for example %28 here
+    for (Use &U : I->operands()) {
+        Value *Op = U.get();
+        Instruction *OpI = dyn_cast<Instruction>(Op);
+        if (!OpI) { continue; } // constants, args are fine, skipping
+        if (OpI->getParent() == OuterPreheader) {
+            continue;
+        }
+        // recursively hoist operand if it's inside the loop
+        if (OuterLoop->contains(OpI)) {
+            if (!hoistValueToPreheader(OpI, OuterLoop, OuterPreheader, DT, Visited)) {
+                return false;
+            }
+            // TODO: Being defensive here but I don't know if it's necessary
+            if (OuterLoop->contains(OpI)) {
+                return false;
+            }
+        }
+    }
+
+    // Now move I before the preheader terminator
+    if (I->getParent() != OuterPreheader) {
+        I->moveBefore(OuterPreheader->getTerminator()->getIterator());
+    }
+
+    // Dominance check
+    if (DT) {
+        for (User *U : I->users()) {
+            if (Instruction *UI = dyn_cast<Instruction>(U)) {
+                if (!DT->dominates(I->getParent(), UI->getParent())) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
 
 std::optional<AccumulatorPattern> MlirToMatMulPass::matchAccumulatorPattern(SmallVector<AccumulatorPattern, 4> &Candidates,
                                                             Value *FMul) {
@@ -328,6 +470,47 @@ std::optional<AccumulatorPattern> MlirToMatMulPass::matchAccumulatorPattern(Smal
     
     return std::nullopt;
                                                 
+}
+
+std::optional<std::pair<Value*, StoreInst*>> MlirToMatMulPass::matchCStore(Loop *InnerLoop, 
+                                                         PHINode *AccPhi,
+                                                         PHINode *I, 
+                                                         PHINode *J, 
+                                                         PHINode *K) {
+    // Get the exit block
+    // The store instruction should be in the exit block (assumption?)
+    BasicBlock *Exit = InnerLoop->getExitBlock();
+    if (!Exit) {
+        errs() << "No exit block found for inner loop\n";
+        return std::nullopt;
+    }
+
+    for (Instruction &Inst : *Exit) {
+        auto *St = dyn_cast<StoreInst>(&Inst);
+        if (!St) {
+            continue;
+        }
+
+        // The value being stored should be the accumulator phi
+        Value *StVal = St->getValueOperand();
+        if (StVal != AccPhi) {
+            continue;
+        }
+
+        Value *StPtr = St->getPointerOperand();
+        auto *GEP = dyn_cast<GetElementPtrInst>(StPtr);
+        if (!GEP) { continue; }
+        if (GEP->getNumIndices() != 1) { continue; }
+
+        // Get the base and index of C
+        Value *Idx = GEP->getOperand(1);
+        IndexKind KC = classifyIndex(Idx, I, J, K);
+        if (KC != IndexKind::C_ij) { continue; }
+        // TODO: verify that the base is the CBase from MatMulBase
+        Value *CBase = GEP->getPointerOperand();
+        return std::make_pair(CBase, St);
+    }
+    return std::nullopt;
 }
 
 /*
