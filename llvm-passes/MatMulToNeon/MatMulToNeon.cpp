@@ -563,12 +563,7 @@ public:
         }
 
         for (int i = 0; i < 4; i++) {
-            // V0: fma of column of A and first element of row B splatted
-      /*       Value *BRowSplat0 = splat(lane(BRowLds[i], 0));
-            Value *BRowSplat1 = splat(lane(BRowLds[i], 1));
-            Value *BRowSplat2 = splat(lane(BRowLds[i], 2));
-            Value *BRowSplat3 = splat(lane(BRowLds[i], 3));
- */            
+            // V0: fma of column of A and first element of row B splatted           
             CallInst *V0 = Builder.CreateCall(FMA, {ColAVecs[i], 
                 BRowSplats[i][0], Acc[0]});
             V0->setFastMathFlags(FMF);
@@ -606,10 +601,6 @@ public:
         IRBuilder<> EB(&(*Exit->getFirstNonPHIIt())); 
 
         Value *CRes[4];
-        // TODO: hardcoded 4
-/*         for (int i = 0; i < 4; i++) {
-            CRes[i] = HB.CreateFAdd(CVecPhisK[i], CVecPhisK_1[i]);
-        } */
 
         // ColVecs groups phi nodes by column
         for (int k = 0; k < ColVecs.size(); k++) {
@@ -700,17 +691,7 @@ public:
         }
 
         bool replaced = replaceLCSSAWithClonedExtracts(L, Preheader, VMap);
-        // Update Exit PHIs to use cloned values from VMap
-        // E.g.,   %c31.0.lcssa = phi float [ %7, %for.cond ]
-/*         for (Instruction &Inst : *Exit) {
-            if (PHINode *PN = dyn_cast<PHINode>(&Inst)) {
-                for (unsigned i = 0, n = PN->getNumIncomingValues(); i < n; i++) {
-                    // Traverse all incoming blocks
-                    BasicBlock *IncomingBB = PN->getIncomingBlock(i);
-                    if (!L.contains(IncomingBB)) { continue; }
-                }
-            }
-        } */
+
         using Update = DominatorTree::UpdateType;
         DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   
@@ -730,27 +711,12 @@ public:
         U.emplace_back(DominatorTree::Insert, Preheader, Exit);
         DTU.applyUpdates(U);
 
-        // Remove from LoopInfo / DominatorTree
-
         // Remove old loop blocks (Header, Latch etc)
         SmallVector<BasicBlock*, 8> ToRemove;
         for (BasicBlock *BB : L.blocks()) {
             ToRemove.push_back(BB);
         }
 
-/* 
-        for (BasicBlock *Succ : successors(Latch)) {
-            if (Succ) {
-                DTU.applyUpdates({ Update{DominatorTree::Delete, Latch, Succ}});
-            }
-        }
-
-        for (BasicBlock *Succ : successors(Header)) {
-            if (Succ) {
-                DTU.applyUpdates({Update{DominatorTree::Delete, Header, Succ}});
-            }
-        }
-       */
         //Latch->dropAllReferences();
         Latch->dropAllReferences();
         Header->dropAllReferences();
@@ -759,9 +725,6 @@ public:
 
         LI.removeBlock(Header);
         DTU.deleteBB(Header);
-   //     Latch->removeFromParent();
-   //     Header->removeFromParent();
-
 
         LI.erase(&L);
 
@@ -770,7 +733,6 @@ public:
             errs() << "Verification failed after loop flattening\n";
             return false;
         }
-        
 
         return true;
     }
