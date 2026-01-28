@@ -37,10 +37,6 @@ struct CanonicalLoop {
     Loop *L;
     PHINode *IndVar;
     uint64_t TripCount;
-/*     BasicBlock *Header;
-    BasicBlock *Latch;
-    BasicBlock *Preheader;
-    BasicBlock *Exit; */
 };
 
 struct MatMulNest {
@@ -91,7 +87,6 @@ public:
         Loop *InnerLoop = Nest.Inner.L;
         Loop *MiddleLoop = Nest.Middle.L;
         Loop *OuterLoop = Nest.Outer.L;
-       // BasicBlock *Body = InnerLoop->getHeader()->getSingleSuccessor();
         BasicBlock *Body = InnerLoop->getLoopLatch();
 
         if (!Body) {
@@ -136,8 +131,6 @@ public:
                 // Get ABase and BBase from GEPA and GEPB
                 MBase.A = GEPA->getPointerOperand();
                 MBase.B = GEPB->getPointerOperand();
-                errs() << "ABase: "; MBase.A->dump();
-                errs() << "BBase: "; MBase.B->dump();
 
                 SmallVector<AccumulatorPattern, 4> APVec;
                 findAccumulatorPatterns(Nest.Inner.L, APVec);
@@ -149,12 +142,12 @@ public:
                     continue;
                 }
                 AP = *APOpt;
-                errs() << "AP AccPhi:\n";
+/*                 errs() << "AP AccPhi:\n";
                 AP.AccPhi->dump();
                 errs() << "AP FMul:\n";
                 AP.FMul->dump();
                 errs() << "AP FAdd:\n";
-                AP.FAdd->dump();
+                AP.FAdd->dump(); */
 
                 std::optional<std::pair<Value*, StoreInst*>> COpt 
                     = matchCStore(InnerLoop, AP.AccPhi, I, J, K);
@@ -176,21 +169,22 @@ public:
         Value *BBase = MBase.B;
         Value *CBase = MBase.C;
         BasicBlock *OuterPH = OuterLoop->getLoopPreheader();
+        assert(OuterPH && "Outer loop must be canonical and have a preheader\n");
+
         // Hoist ABase, BBase and CBase into the preheader
         if (!hoistValueToPreheader(ABase, OuterLoop, OuterPH)) {
             errs() << "Unable to hoist ABase value: "; ABase->dump();
-            //return std::nullopt;
+            return PreservedAnalyses::none();
         }
         if (!hoistValueToPreheader(BBase, OuterLoop, OuterPH)) {
             errs() << "Unable to hoist BBase value: "; BBase->dump();
-            //return std::nullopt;
+            return PreservedAnalyses::none();
         }
         if (!hoistValueToPreheader(CBase, OuterLoop, OuterPH)) {
             errs() << "Unable to hoist CBase value: "; CBase->dump();
-            //return std::nullopt;
+            return PreservedAnalyses::none();
         }
 
-        assert(OuterPH && "Outer loop must be canonical and have a preheader\n");
         IRBuilder<> B(OuterPH->getTerminator());
         SmallVector<Value*, 3> Args = {ABase, BBase, CBase };
         B.CreateCall(Kernel, Args);
@@ -298,7 +292,6 @@ public:
             }
             Loop *inner = middle->getSubLoops()[0];
             if (inner->getSubLoops().size() != 0) {
-                errs() << "subloop size is greater than\n";
                 continue;
             }
             auto outerInfo = analyzeCanonicalLoop(outer, SE);
@@ -438,14 +431,6 @@ bool MlirToMatMulPass::hoistValueToPreheader(Value *V, Loop *OuterLoop, BasicBlo
 std::optional<AccumulatorPattern> MlirToMatMulPass::matchAccumulatorPattern(SmallVector<AccumulatorPattern, 4> &Candidates,
                                                             Value *FMul) {
 
-/*     // Get the value from Latch
-    BasicBlock *Latch = InnerLoop->getLoopLatch();
-    // At this point the Phi should have one value from Latch
-    // Returning nullptr just in case it's called from unexpected places
-    if (Phi->getBasicBlockIndex(Latch) < 0) {
-        errs() << "The argument PhiNode should have an incoming value from loop latch\n";
-        return std::nullopt;
-    } */
     assert(FMul && "Null FMul as argument to matchAccumulatorPattern");
     BinaryOperator *FMulBOP = dyn_cast<BinaryOperator>(FMul);
     if (!FMulBOP || FMulBOP->getOpcode() != Instruction::FMul) {
