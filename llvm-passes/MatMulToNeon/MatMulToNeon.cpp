@@ -1,6 +1,4 @@
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -10,7 +8,6 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Config/llvm-config.h"
-#include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/IR/Analysis.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -28,11 +25,8 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
-#include "llvm/IR/IntrinsicsAArch64.h"
-#include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
@@ -40,12 +34,10 @@
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Alignment.h"
-#include "llvm/Support/CFGUpdate.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/InstructionCost.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/type_traits.h"
 #include "llvm/Transforms/IPO/HotColdSplitting.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -53,7 +45,6 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <cstddef>
-#include <string>
 
 // Deal with 4x4 matrices now
 #define MAT_COL 4
@@ -165,8 +156,6 @@ static bool assignRolColFor4x4(RCInfo &RC, LPInfo &LP) {
         int idx = tryInferRowColIndex(BL->getPointerOperand(), LP);
         if (idx > -1) {
             RC.Col = idx / ELEM_SIZE;
-            //errs() << "Col: " << RC.Col << "\n";
-
         } else {
             // Same handling as Row
             errs() << "Did not successfully infer Col info for loadInst ";
@@ -199,11 +188,9 @@ static bool isFloatAccPhi(PHINode *Phi) {
 
 static bool matchFaddOfFmulReduction(PHINode *PN, BasicBlock *Latch,
                                      RCInfo &RCResult) {
-    // TODO: maybe use isFloatTy?
     if (!PN || !PN->getType()->isFloatingPointTy()) return false;
 
     // Find the latch update in the phi node
-    // TODO: maybe need to check if the PN has exactly 2 incoming values
     int LatchIdx = PN->getBasicBlockIndex(Latch);
 
     if (LatchIdx < 0) return false;
@@ -249,12 +236,6 @@ static void CleanUpScalarPhi(SmallVector<SmallVector<RCInfo, 4>, 4> &ColVecs) {
                 errs() << "PN use empty" << "\n";
                 PN->removeFromParent();
             }
-         /*    if (AddI->use_empty()) {
-                AddI->removeFromParent();
-            }
-            if (MulI->use_empty()) {
-                MulI->removeFromParent();
-            } */
         }
     }
 }
@@ -305,7 +286,6 @@ public:
 
     bool tryRewrite4x4Kernel(Function &F, Loop &L, ScalarEvolutionAnalysis::Result &SE, 
                             LoopInfo &LI, DominatorTree &DT, LPInfo &LP) {
-        errs() << "Try Rewrite 4x4 Kernel\n";
         BasicBlock *Header = L.getHeader();
         BasicBlock *Body = Header; // deal with single-block loops for now
         BasicBlock *Latch = L.getLoopLatch();
@@ -332,26 +312,18 @@ public:
 
         for (auto &I : *Header) {
             if (auto *Phi = dyn_cast<PHINode>(&I)) {
-                errs() << "Checking phi nodes\n";
                 RCInfo RC;
                 if (InductionDescriptor::isInductionPHI(Phi, &L, &SE, ID)) {
                     LP.IVPhi = Phi;
                     IVPhi = Phi;
                 }
                 if (matchFaddOfFmulReduction(Phi, Latch, RC)) {
-                    errs() << "Matched phi node\n";
-                    //printRC(RC);
-                    /*
-                    At this point LP should contain info for ABase, BBase and Induction Phi
-                    */
                     if(assignRolColFor4x4(RC, LP)) {
                         ColVecs[RC.Col].push_back(RC);
                         Accs.push_back(Phi);
                     } else {
                         return false;
                     }
-                    //errs() << "RC.Col: " << RC.Col;
-
                 }
             }
         }
@@ -423,13 +395,6 @@ public:
             BRowLds[i] = Builder.CreateAlignedLoad(V4F, BRow_ptr, 
                 Align(16), "brow"+Twine(i));
         }
-/* 
-        Value *bs_k[4], *bs_k1[4];
-        for (int j = 0; j < 4; j++) {
-            bs_k[j] = splat(lane(Bv, j));
-            bs_k1[j] = splat(lane(Bv1, j));
-        } */
-
 
         // For building rows of A
         // Precompute row base for A
@@ -491,11 +456,7 @@ public:
             auto CVecK = PHINode::Create(V4F, 2,
             "cvec"+Twine(k), Header->getFirstNonPHIIt());
             SmallVector<RCInfo, 4> ColK = ColVecs[k];
-            // CVecK_1 for unrolling K by 2
-/*             auto CVecK_1 = PHINode::Create(V4F, 2,
-            "cvec"+Twine(k)+"_1", Header->getFirstNonPHIIt()); */
             CVecPhisK.push_back(CVecK);
-          //  CVecPhisK_1.push_back(CVecK_1);
 
             // Create vector phi
             auto *ZeroV = Constant::getNullValue(V4F);
@@ -504,9 +465,6 @@ public:
             CVecK->addIncoming(ZeroV, Preheader);       
 
         } // End for loop for one k (B[j][0] -> B[j][k])
-
-        //Value *CVecK_vec[4];
-        //Value *CVecK1_vec[4];
         
         auto broadcastLane = [&] (Value *brow, int idx, 
             IRBuilder<>&Builder) {
@@ -522,7 +480,6 @@ public:
         auto splat = [&](Value *s) {
             return Builder.CreateVectorSplat(4, s);
         };
-
         
         FastMathFlags FMF; 
         FMF.setFast();
@@ -584,16 +541,13 @@ public:
             V3->setFastMathFlags(FMF);
             Acc[3] = V3;
             
-            //VecPNs.push_back(CVecK_1);
-
-            //CVecK_vec[i]
         }
 
         for (int i = 0; i < 4; i++) {
             CVecPhisK[i]->addIncoming(Acc[i], Latch);
         }
 
-        // TODO: Move extraelement of final results out of the header
+        // TODO: Move extratelement of final results out of the header
         // and into the loop exit block
         // Replace scalars with vector phi
         // Traverse through all phi nodes storing the result before 
@@ -717,7 +671,6 @@ public:
             ToRemove.push_back(BB);
         }
 
-        //Latch->dropAllReferences();
         Latch->dropAllReferences();
         Header->dropAllReferences();
         LI.removeBlock(Latch);
