@@ -1,1 +1,8 @@
 build
+transforms/tutorial/*
+qu4d-mlir/test/qu4d/** 
+!qu4d-mlir/test/qu4d/**/
+!qu4d-mlir/test/qu4d/**/*.cpp
+llvm-passes/test/**
+!llvm-passes/test/CPP
+!llvm-passes/test/CPP/*.cpp
