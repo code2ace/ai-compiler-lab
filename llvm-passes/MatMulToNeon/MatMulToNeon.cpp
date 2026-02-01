@@ -337,12 +337,6 @@ public:
             sort(ColVecs[i], [](const RCInfo &rhs, const RCInfo &lhs) {
                 return rhs.Row < lhs.Row;
             });
-            errs() << "*********** Col: " << i << "**********\n";
-            for (int j = 0; j < ColVecs[i].size(); j++) {
-                printRC(ColVecs[i][j]);
-                errs() << "Row: " << ColVecs[i][j].Row << "\n";
-                errs() << "Col: " << ColVecs[i][j].Col << "\n";
-            }
         }
 
         // IR builders, one for Latch, one for Header
