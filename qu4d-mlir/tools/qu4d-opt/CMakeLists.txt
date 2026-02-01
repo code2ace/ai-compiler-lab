@@ -1,5 +1,9 @@
 add_executable(qu4d-opt qu4d-opt.cpp)
 target_link_libraries(qu4d-opt PRIVATE
+  MLIRIR 
+  MLIRParser
+  MLIRSupport
+
   qu4d-mlir-lib
   MLIRArithDialect 
   MLIRFuncDialect 
@@ -8,8 +12,14 @@ target_link_libraries(qu4d-opt PRIVATE
   MLIRVectorDialect 
   MLIRLLVMDialect 
   MLIRSCFDialect 
-  MLIRIR 
-  MLIRParser
+
+  MLIRFuncToLLVM
+  MLIRArithToLLVM
+  MLIRMemRefToLLVM
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRVectorToLLVM
+
   MLIRPass 
   MLIROptLib
   MLIRTransforms

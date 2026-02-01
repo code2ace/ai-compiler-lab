@@ -1,8 +1,6 @@
 add_library(qu4d-mlir-lib
   IR/Qu4dDialect.cpp
   IR/Qu4dOps.cpp
-  Transforms/LowerToArith.cpp
-  Transforms/DetectMicrokernel.cpp
   Transforms/LowerMatmul4x4.cpp
   Transforms/Qu4dFromLinalg.cpp
   Transforms/Passes.cpp
