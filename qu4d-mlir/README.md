@@ -185,13 +185,16 @@ qu4d-opt -canonicalize qu4d_matmul4x4_canonicalize.mlir | FileCheck qu4d_matmul4
 ### Generate Vectorized Kernel
 ```bash
 # Generate IR for kernel
-clang++ -O3 -ffast-math -mcpu=apple-m4 -std=c++17 -emit-llvm  -S mat4x4_16acc_test.cpp -o mat4x4_O3.ll
+clang++ -O3 -ffast-math -std=c++17 -emit-llvm  -S mat4x4_16acc_test.cpp -o mat4x4_O3.ll
 
 # Link with output from mlir2matmul pass (last step of our pipeline)
 llvm-link mm_output.ll mat4x4_O3.ll -o merged_O3.ll
 
 # Generate object file
-clang++ -O3 -ffast-math -mcpu=apple-m4 merged_O3.ll bench_mat4x4.cpp -o test_merge_O3
+clang++ -O3 -ffast-math merged_O3.ll bench_mat4x4.cpp -o test_merge_O3
+
+# Optionally, instead of llvm-link and then clang, compile and link directly with clang
+clang++ -O3 -ffast-math mat4x4_16acc_test.cpp mm_output.ll bench_mat4x4.cpp -o test_merge_O3
 
 # Run benchmark (also runs a small test for correctness)
 ./test_merge_O3
