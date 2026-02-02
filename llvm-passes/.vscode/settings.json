@@ -1,5 +1,0 @@
-{
-  "clangd.arguments": [
-    "--compile-commands-dir=/Users/jialeichen/Dev/LLVM/ai-compiler-lab/llvm-passes/build"
-  ]
-}
