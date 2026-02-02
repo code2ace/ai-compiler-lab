@@ -62,7 +62,6 @@ struct LinalgMatmulToQu4dPattern
 struct Qu4dMatmulFromLinalgPass 
     : public ::mlir::PassWrapper<Qu4dMatmulFromLinalgPass, 
                           ::mlir::OperationPass<mlir::func::FuncOp>> {
-    // TODO: is the following necessary?
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Qu4dMatmulFromLinalgPass)
     
     void getDependentDialects(mlir::DialectRegistry &registry) const override {

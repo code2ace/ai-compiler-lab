@@ -1,15 +1,3 @@
-// mat4x4_16acc_test.cpp
-// Build (native run):
-//   clang++ -O2 -std=c++17 mat4x4_16acc_test.cpp -o mat4x4_test && ./mat4x4_test
-//
-// Build IR for your pass (keeps fmul+fadd separate; no auto-FMA):
-//   clang++ -O0 -ffp-contract=off -S -emit-llvm mat4x4_16acc_test.cpp -o mat4x4_16acc_test.ll
-//   # Then run your pass on the .ll and compare outputs.
-//
-// Optional: IR with nice canonical loops for matching:
-//   clang++ -O0 -ffp-contract=off -S -emit-llvm mat4x4_16acc_test.cpp -o - |
-//   opt -S -passes='mem2reg,instcombine,simplifycfg,loop-simplify,lcssa,indvars' > dev.ll
-
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
